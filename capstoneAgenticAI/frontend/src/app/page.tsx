@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ArrowRight, FileSearch, History, Settings, Sparkles, UploadCloud } from "lucide-react";
+import { ArrowRight, CheckSquare, FileSearch, History, Settings, Sparkles, UploadCloud } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -13,11 +13,16 @@ const QUICK_LINKS = [
     icon: UploadCloud,
   },
   {
+    href: "/approval",
+    title: "Approvals",
+    description: "Review pending designs and record stakeholder sign-off.",
+    icon: CheckSquare,
+  },
+  {
     href: "/history",
     title: "Design History",
     description: "Browse previously generated designs and their approval status.",
     icon: History,
-    comingSoon: true,
   },
   {
     href: "/settings",
