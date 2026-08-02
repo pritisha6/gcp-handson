@@ -1,0 +1,86 @@
+@import "./variables.css";
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+
+  /* Mobile-first: base font size scales up on larger viewports */
+  html {
+    font-size: 15px;
+  }
+
+  @screen md {
+    html {
+      font-size: 16px;
+    }
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+  }
+}
+
+/* Print-friendly styles: used by the design detail page's "Download PDF"
+   action (window.print()) and by anyone printing history/approval pages.
+   Per-component print:hidden / print:break-inside-avoid utility classes
+   handle most of this; these rules cover cross-cutting page behavior. */
+@media print {
+  html,
+  body {
+    background: #fff;
+    font-size: 11pt;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+
+  /* Buttons, forms, and interactive-only chrome never make sense on paper. */
+  button,
+  [role="button"],
+  input,
+  textarea,
+  select {
+    display: none !important;
+  }
+
+  /* Re-show elements that are legitimately part of the printed content
+     even though they're built from the above elements (e.g. table filter
+     inputs get hidden, but nothing inside a Card's content that isn't
+     interactive should be). Scoped opt-outs use .print-visible. */
+  .print-visible {
+    display: revert !important;
+  }
+
+  .shadow,
+  .shadow-sm,
+  .shadow-md,
+  .shadow-lg {
+    box-shadow: none !important;
+  }
+
+  table {
+    page-break-inside: auto;
+  }
+
+  tr {
+    page-break-inside: avoid;
+  }
+}
