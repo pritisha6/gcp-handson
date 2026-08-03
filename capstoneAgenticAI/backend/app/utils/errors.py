@@ -119,7 +119,7 @@ class ExtractionError(AppError):
 
 
 class ExternalServiceError(AppError):
-    """Raised when a downstream service (Claude, OpenAI, Pinecone, GCP APIs) fails."""
+    """Raised when a downstream service (Groq, OpenAI, Pinecone, GCP APIs) fails."""
 
     status_code = status.HTTP_502_BAD_GATEWAY
     error_code = "external_service_error"

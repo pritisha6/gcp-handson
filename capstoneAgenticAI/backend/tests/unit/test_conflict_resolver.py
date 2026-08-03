@@ -1,4 +1,5 @@
 """Unit tests for ConflictResolver."""
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -18,17 +19,17 @@ def _no_sleep(monkeypatch):
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(CLAUDE_API_KEY="k", GCP_PROJECT_ID="p", PINECONE_API_KEY="k", OPENAI_API_KEY="k")
+    return Settings(GROQ_API_KEY="k", GCP_PROJECT_ID="p", PINECONE_API_KEY="k", OPENAI_API_KEY="k")
 
 
 @pytest.fixture
-def claude_client() -> MagicMock:
+def groq_client() -> MagicMock:
     return MagicMock()
 
 
 @pytest.fixture
-def resolver(claude_client: MagicMock, settings: Settings) -> ConflictResolver:
-    return ConflictResolver(client=claude_client, settings=settings)
+def resolver(groq_client: MagicMock, settings: Settings) -> ConflictResolver:
+    return ConflictResolver(client=groq_client, settings=settings)
 
 
 def _requirement(**overrides) -> Requirement:
@@ -54,21 +55,30 @@ def _requirement(**overrides) -> Requirement:
 
 
 def _fake_resolution_response(resolutions: list):
-    tool_block = SimpleNamespace(type="tool_use", input={"resolutions": resolutions}, name="record_resolutions")
-    return SimpleNamespace(content=[tool_block], usage=SimpleNamespace(input_tokens=50, output_tokens=20))
+    tool_call = SimpleNamespace(
+        function=SimpleNamespace(
+            name="record_resolutions", arguments=json.dumps({"resolutions": resolutions})
+        ),
+        id="call_1",
+    )
+    message = SimpleNamespace(tool_calls=[tool_call])
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=message)],
+        usage=SimpleNamespace(prompt_tokens=50, completion_tokens=20),
+    )
 
 
-def test_no_conflicts_for_well_formed_requirement(resolver, claude_client):
+def test_no_conflicts_for_well_formed_requirement(resolver, groq_client):
     req = _requirement()
 
     conflicts = resolver.detect_conflicts(req)
 
     assert conflicts == []
-    claude_client.messages.create.assert_not_called()
+    groq_client.chat.completions.create.assert_not_called()
 
 
-def test_detects_latency_vs_freshness_conflict(resolver, claude_client):
-    claude_client.messages.create.side_effect = RuntimeError("no network in this test")
+def test_detects_latency_vs_freshness_conflict(resolver, groq_client):
+    groq_client.chat.completions.create.side_effect = RuntimeError("no network in this test")
     req = _requirement(performance={"latency_sla_minutes": 5, "data_freshness": "daily"})
 
     conflicts = resolver.detect_conflicts(req)
@@ -77,11 +87,11 @@ def test_detects_latency_vs_freshness_conflict(resolver, claude_client):
     assert match.severity == ConflictSeverity.ERROR
     assert "performance.latency_sla_minutes" in match.fields_involved
     assert "performance.data_freshness" in match.fields_involved
-    assert match.suggested_resolution  # static fallback used since the Claude call failed
+    assert match.suggested_resolution  # static fallback used since the Groq call failed
 
 
-def test_detects_budget_vs_throughput_conflict(resolver, claude_client):
-    claude_client.messages.create.side_effect = RuntimeError("no network in this test")
+def test_detects_budget_vs_throughput_conflict(resolver, groq_client):
+    groq_client.chat.completions.create.side_effect = RuntimeError("no network in this test")
     req = _requirement(
         performance={"peak_throughput_msgs_sec": 5000}, budget={"monthly_cap_usd": 200, "currency": "USD"}
     )
@@ -91,8 +101,8 @@ def test_detects_budget_vs_throughput_conflict(resolver, claude_client):
     assert any(c.type == "budget_vs_throughput" and c.severity == ConflictSeverity.ERROR for c in conflicts)
 
 
-def test_detects_team_skills_vs_complexity_conflict(resolver, claude_client):
-    claude_client.messages.create.side_effect = RuntimeError("no network in this test")
+def test_detects_team_skills_vs_complexity_conflict(resolver, groq_client):
+    groq_client.chat.completions.create.side_effect = RuntimeError("no network in this test")
     req = _requirement(
         data_sources=[{"name": "events", "type": "Messaging", "size_gb": 5, "throughput_records_sec": 20}],
         team={"size": 2, "skills": ["excel"]},
@@ -103,7 +113,7 @@ def test_detects_team_skills_vs_complexity_conflict(resolver, claude_client):
     assert any(c.type == "team_skills_vs_complexity" and c.severity == ConflictSeverity.WARNING for c in conflicts)
 
 
-def test_no_team_skills_conflict_when_relevant_skill_present(resolver, claude_client):
+def test_no_team_skills_conflict_when_relevant_skill_present(resolver, groq_client):
     req = _requirement(
         data_sources=[{"name": "events", "type": "Messaging", "size_gb": 5, "throughput_records_sec": 20}],
         team={"size": 2, "skills": ["Apache Kafka", "Python"]},
@@ -112,11 +122,11 @@ def test_no_team_skills_conflict_when_relevant_skill_present(resolver, claude_cl
     conflicts = resolver.detect_conflicts(req)
 
     assert not any(c.type == "team_skills_vs_complexity" for c in conflicts)
-    claude_client.messages.create.assert_not_called()
+    groq_client.chat.completions.create.assert_not_called()
 
 
-def test_detects_freshness_vs_cost_conflict(resolver, claude_client):
-    claude_client.messages.create.side_effect = RuntimeError("no network in this test")
+def test_detects_freshness_vs_cost_conflict(resolver, groq_client):
+    groq_client.chat.completions.create.side_effect = RuntimeError("no network in this test")
     req = _requirement(
         performance={"data_freshness": "real-time"}, budget={"monthly_cap_usd": 100, "currency": "USD"}
     )
@@ -126,8 +136,8 @@ def test_detects_freshness_vs_cost_conflict(resolver, claude_client):
     assert any(c.type == "freshness_vs_cost" and c.severity == ConflictSeverity.WARNING for c in conflicts)
 
 
-def test_conflicts_sorted_errors_before_warnings(resolver, claude_client):
-    claude_client.messages.create.side_effect = RuntimeError("no network in this test")
+def test_conflicts_sorted_errors_before_warnings(resolver, groq_client):
+    groq_client.chat.completions.create.side_effect = RuntimeError("no network in this test")
     req = _requirement(
         performance={"latency_sla_minutes": 5, "data_freshness": "real-time", "peak_throughput_msgs_sec": 5000},
         budget={"monthly_cap_usd": 100, "currency": "USD"},
@@ -145,20 +155,20 @@ def test_conflicts_sorted_errors_before_warnings(resolver, claude_client):
     assert all(s == ConflictSeverity.ERROR for s in severities[:first_warning_index])
 
 
-def test_claude_enrichment_overrides_static_resolution(resolver, claude_client):
-    claude_client.messages.create.return_value = _fake_resolution_response(
-        [{"type": "latency_vs_freshness", "suggested_resolution": "Custom Claude-generated advice."}]
+def test_groq_enrichment_overrides_static_resolution(resolver, groq_client):
+    groq_client.chat.completions.create.return_value = _fake_resolution_response(
+        [{"type": "latency_vs_freshness", "suggested_resolution": "Custom Groq-generated advice."}]
     )
     req = _requirement(performance={"latency_sla_minutes": 5, "data_freshness": "daily"})
 
     conflicts = resolver.detect_conflicts(req)
 
     match = next(c for c in conflicts if c.type == "latency_vs_freshness")
-    assert match.suggested_resolution == "Custom Claude-generated advice."
+    assert match.suggested_resolution == "Custom Groq-generated advice."
 
 
-def test_claude_enrichment_failure_falls_back_to_static_resolution(resolver, claude_client):
-    claude_client.messages.create.side_effect = RuntimeError("service unavailable")
+def test_groq_enrichment_failure_falls_back_to_static_resolution(resolver, groq_client):
+    groq_client.chat.completions.create.side_effect = RuntimeError("service unavailable")
     req = _requirement(performance={"latency_sla_minutes": 5, "data_freshness": "daily"})
 
     conflicts = resolver.detect_conflicts(req)

@@ -608,7 +608,7 @@ class GuardrailValidator:
             severity=GuardrailSeverity.WARN,
             message=f"Runs produced different architecture paths across {runs} attempts: {list(paths)}.",
             field=None,
-            remediation="Investigate non-determinism (e.g. Claude sampling, RAG data changes between runs).",
+            remediation="Investigate non-determinism (e.g. Groq sampling, RAG data changes between runs).",
             source="GR 4.4 Determinism",
         )
 

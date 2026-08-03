@@ -12,7 +12,7 @@ from app.utils.errors import DocumentProcessingError, FileTooLargeError, Unsuppo
 @pytest.fixture
 def settings() -> Settings:
     return Settings(
-        CLAUDE_API_KEY="k",
+        GROQ_API_KEY="k",
         GCP_PROJECT_ID="p",
         PINECONE_API_KEY="k",
         OPENAI_API_KEY="k",

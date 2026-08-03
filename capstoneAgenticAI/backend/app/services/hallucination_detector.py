@@ -2,7 +2,7 @@
 import json
 from typing import Any, Dict, List, Optional
 
-from anthropic import Anthropic
+from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import Settings, get_settings
@@ -10,6 +10,7 @@ from app.schemas.design import Design, DesignOutput
 from app.schemas.guardrail import Hallucination
 from app.utils.api_cost_tracker import api_cost_tracker
 from app.utils.errors import ExternalServiceError
+from app.utils.llm_client import ToolCallResult, call_tool, get_llm_client
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -61,9 +62,9 @@ _HALLUCINATION_TOOL = {
 class HallucinationDetector:
     """Scans a Design's free-text reasoning for claims not traceable to its own structured data."""
 
-    def __init__(self, client: Optional[Anthropic] = None, settings: Optional[Settings] = None) -> None:
+    def __init__(self, client: Optional[OpenAI] = None, settings: Optional[Settings] = None) -> None:
         self._settings = settings or get_settings()
-        self._client = client or Anthropic(api_key=self._settings.CLAUDE_API_KEY)
+        self._client = client or get_llm_client(self._settings)
 
     def detect_hallucinations(self, design: Design) -> List[Hallucination]:
         """Find claims in a design's reasoning text with no traceable source.
@@ -73,7 +74,7 @@ class HallucinationDetector:
                 designs with no output yet produce no findings.
 
         Returns:
-            Unsourced claims found, if any. Never raises: a failed Claude
+            Unsourced claims found, if any. Never raises: a failed Groq
             call is logged and treated as "no findings" rather than blocking
             the rest of the validation pipeline.
         """
@@ -87,7 +88,7 @@ class HallucinationDetector:
         known_facts = self._collect_known_facts(design.output)
 
         try:
-            raw = self._call_claude(reasoning_text, known_facts)
+            raw = self._call_groq(reasoning_text, known_facts)
         except Exception:
             logger.exception("Hallucination detection failed for design '%s'; skipping check", design.id)
             return []
@@ -140,35 +141,33 @@ class HallucinationDetector:
         }
 
     @retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=30))
-    def _call_claude_raw(self, reasoning_text: str, known_facts: Dict[str, Any]):
+    def _call_groq_raw(self, reasoning_text: str, known_facts: Dict[str, Any]) -> ToolCallResult:
         user_content = json.dumps({"reasoning_text": reasoning_text, "known_facts": known_facts}, default=str)
-        return self._client.messages.create(
-            model=self._settings.CLAUDE_MODEL,
+        return call_tool(
+            self._client,
+            model=self._settings.GROQ_MODEL,
+            system_prompt=_SYSTEM_PROMPT,
+            user_content=user_content,
+            tool_name="record_hallucinations",
+            tool_description=_HALLUCINATION_TOOL["description"],
+            input_schema=_HALLUCINATION_TOOL["input_schema"],
             max_tokens=2048,
             temperature=0,
-            system=_SYSTEM_PROMPT,
-            tools=[_HALLUCINATION_TOOL],
-            tool_choice={"type": "tool", "name": "record_hallucinations"},
-            messages=[{"role": "user", "content": user_content}],
         )
 
-    def _call_claude(self, reasoning_text: str, known_facts: Dict[str, Any]) -> Dict[str, Any]:
+    def _call_groq(self, reasoning_text: str, known_facts: Dict[str, Any]) -> Dict[str, Any]:
         try:
-            response = self._call_claude_raw(reasoning_text, known_facts)
+            result = self._call_groq_raw(reasoning_text, known_facts)
         except Exception as exc:
-            raise ExternalServiceError("claude", f"hallucination detection failed: {exc}") from exc
+            raise ExternalServiceError("groq", f"hallucination detection failed: {exc}") from exc
 
-        usage = getattr(response, "usage", None)
         api_cost_tracker.record_call(
-            "claude",
-            input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
-            output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
+            "groq",
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
         )
 
-        tool_use = next((block for block in response.content if block.type == "tool_use"), None)
-        if tool_use is None:
-            raise ExternalServiceError("claude", "no structured hallucination report returned")
-        return tool_use.input
+        return result.arguments
 
 
 _hallucination_detector: Optional[HallucinationDetector] = None

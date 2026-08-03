@@ -24,7 +24,7 @@ class DecisionMaker:
     wired into live service selection rather than only being callable
     standalone. Left unset by default (no behavior change) since
     constructing a full ``GuardrailValidator`` pulls in several heavier
-    dependencies (Claude, Firestore) that not every caller needs.
+    dependencies (Groq, Firestore) that not every caller needs.
     """
 
     def __init__(

@@ -1,4 +1,5 @@
 """Unit tests for RequirementExtractor."""
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -12,23 +13,28 @@ from app.utils.errors import ExtractionError
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(CLAUDE_API_KEY="k", GCP_PROJECT_ID="p", PINECONE_API_KEY="k", OPENAI_API_KEY="k")
+    return Settings(GROQ_API_KEY="k", GCP_PROJECT_ID="p", PINECONE_API_KEY="k", OPENAI_API_KEY="k")
 
 
 @pytest.fixture
-def claude_client() -> MagicMock:
+def groq_client() -> MagicMock:
     return MagicMock()
 
 
 @pytest.fixture
-def extractor(claude_client: MagicMock, settings: Settings) -> RequirementExtractor:
-    return RequirementExtractor(client=claude_client, settings=settings)
+def extractor(groq_client: MagicMock, settings: Settings) -> RequirementExtractor:
+    return RequirementExtractor(client=groq_client, settings=settings)
 
 
 def _fake_response(tool_input: dict, input_tokens: int = 100, output_tokens: int = 50):
-    tool_block = SimpleNamespace(type="tool_use", input=tool_input, name="record_requirements", id="toolu_1")
+    tool_call = SimpleNamespace(
+        function=SimpleNamespace(name="record_requirements", arguments=json.dumps(tool_input)),
+        id="call_1",
+    )
+    message = SimpleNamespace(tool_calls=[tool_call])
     return SimpleNamespace(
-        content=[tool_block], usage=SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens)
+        choices=[SimpleNamespace(message=message)],
+        usage=SimpleNamespace(prompt_tokens=input_tokens, completion_tokens=output_tokens),
     )
 
 
@@ -53,8 +59,8 @@ _COMPLETE_TOOL_INPUT = {
 }
 
 
-def test_extract_requirements_returns_valid_requirement(extractor, claude_client):
-    claude_client.messages.create.return_value = _fake_response(_COMPLETE_TOOL_INPUT)
+def test_extract_requirements_returns_valid_requirement(extractor, groq_client):
+    groq_client.chat.completions.create.return_value = _fake_response(_COMPLETE_TOOL_INPUT)
 
     result = extractor.extract_requirements(["Some document text about orders_db..."])
 
@@ -72,29 +78,29 @@ def test_extract_requirements_returns_valid_requirement(extractor, claude_client
     assert "Stakeholder priorities: cost, reliability" in result.context
 
 
-def test_extract_requirements_records_api_cost(extractor, claude_client):
+def test_extract_requirements_records_api_cost(extractor, groq_client):
     from app.utils.api_cost_tracker import api_cost_tracker
 
-    claude_client.messages.create.return_value = _fake_response(_COMPLETE_TOOL_INPUT, 111, 22)
-    before = api_cost_tracker.summary().get("claude", {}).get("calls", 0)
+    groq_client.chat.completions.create.return_value = _fake_response(_COMPLETE_TOOL_INPUT, 111, 22)
+    before = api_cost_tracker.summary().get("groq", {}).get("calls", 0)
 
     extractor.extract_requirements(["doc"])
 
-    after = api_cost_tracker.summary()["claude"]["calls"]
+    after = api_cost_tracker.summary()["groq"]["calls"]
     assert after == before + 1
 
 
-def test_extract_requirements_with_warnings_returns_no_warnings_for_complete_data(extractor, claude_client):
-    claude_client.messages.create.return_value = _fake_response(_COMPLETE_TOOL_INPUT)
+def test_extract_requirements_with_warnings_returns_no_warnings_for_complete_data(extractor, groq_client):
+    groq_client.chat.completions.create.return_value = _fake_response(_COMPLETE_TOOL_INPUT)
 
     _, warnings = extractor.extract_requirements_with_warnings(["doc"])
 
     assert warnings == []
 
 
-def test_extract_requirements_fills_defaults_for_missing_fields(extractor, claude_client):
+def test_extract_requirements_fills_defaults_for_missing_fields(extractor, groq_client):
     incomplete_input = {"data_sources": [], "performance": {}, "budget": {}, "team": {}, "compliance": {}}
-    claude_client.messages.create.return_value = _fake_response(incomplete_input)
+    groq_client.chat.completions.create.return_value = _fake_response(incomplete_input)
 
     requirement, warnings = extractor.extract_requirements_with_warnings(["ambiguous doc"])
 
@@ -108,9 +114,9 @@ def test_extract_requirements_fills_defaults_for_missing_fields(extractor, claud
     assert any("team.size" in w for w in warnings)
 
 
-def test_extract_requirements_invalid_data_source_type_defaults_to_db(extractor, claude_client):
+def test_extract_requirements_invalid_data_source_type_defaults_to_db(extractor, groq_client):
     tool_input = {**_COMPLETE_TOOL_INPUT, "data_sources": [{"name": "queue", "type": "Bogus"}]}
-    claude_client.messages.create.return_value = _fake_response(tool_input)
+    groq_client.chat.completions.create.return_value = _fake_response(tool_input)
 
     requirement, warnings = extractor.extract_requirements_with_warnings(["doc"])
 
@@ -128,18 +134,18 @@ def test_extract_requirements_raises_for_blank_documents(extractor):
         extractor.extract_requirements(["   ", "\n"])
 
 
-def test_extract_requirements_raises_when_no_tool_use_returned(extractor, claude_client):
-    claude_client.messages.create.return_value = SimpleNamespace(
-        content=[SimpleNamespace(type="text", text="I couldn't extract anything.")],
-        usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+def test_extract_requirements_raises_when_no_tool_use_returned(extractor, groq_client):
+    groq_client.chat.completions.create.return_value = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[]))],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
     )
 
     with pytest.raises(ExtractionError):
         extractor.extract_requirements(["doc"])
 
 
-def test_extract_requirements_wraps_claude_failure_as_extraction_error(extractor):
-    extractor._call_claude_raw = MagicMock(side_effect=RuntimeError("network error"))
+def test_extract_requirements_wraps_groq_failure_as_extraction_error(extractor):
+    extractor._call_groq_raw = MagicMock(side_effect=RuntimeError("network error"))
 
     with pytest.raises(ExtractionError):
         extractor.extract_requirements(["doc"])

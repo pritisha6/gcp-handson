@@ -1,9 +1,9 @@
-"""Generates candidate services for one Tree-of-Thought architecture layer, via Claude."""
+"""Generates candidate services for one Tree-of-Thought architecture layer, via Groq."""
 import hashlib
 import json
 from typing import Any, Dict, List, Optional
 
-from anthropic import Anthropic
+from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import Settings, get_settings
@@ -11,6 +11,7 @@ from app.schemas.tot import LAYERS, Candidate
 from app.utils.api_cost_tracker import api_cost_tracker
 from app.utils.cache import TTLCache
 from app.utils.errors import ExternalServiceError
+from app.utils.llm_client import ToolCallResult, call_tool, get_llm_client
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -61,22 +62,23 @@ _CANDIDATES_TOOL = {
 
 
 class ThoughtGenerator:
-    """Proposes candidate services for one ToT architecture layer using Claude.
+    """Proposes candidate services for one ToT architecture layer using Groq.
 
-    Determinism note: Claude's own sampling is not perfectly reproducible even
-    at ``temperature=0``, but that is the closest practical approximation to a
-    fixed seed the Messages API offers; all *our* logic downstream (caching,
-    sorting, pruning) is fully deterministic given the same model output.
+    Determinism note: the model's own sampling is not perfectly reproducible
+    even at ``temperature=0``, but that is the closest practical approximation
+    to a fixed seed the chat completions API offers; all *our* logic
+    downstream (caching, sorting, pruning) is fully deterministic given the
+    same model output.
     """
 
     def __init__(
         self,
-        client: Optional[Anthropic] = None,
+        client: Optional[OpenAI] = None,
         settings: Optional[Settings] = None,
         cache: Optional[TTLCache] = None,
     ) -> None:
         self._settings = settings or get_settings()
-        self._client = client or Anthropic(api_key=self._settings.CLAUDE_API_KEY)
+        self._client = client or get_llm_client(self._settings)
         self._cache = cache or TTLCache()
 
     def generate_candidates(self, requirements: Dict[str, Any], layer: str) -> List[Candidate]:
@@ -93,7 +95,7 @@ class ThoughtGenerator:
 
         Raises:
             ValueError: If ``layer`` is not a recognized architecture layer.
-            ExternalServiceError: If Claude cannot be reached or returns no candidates.
+            ExternalServiceError: If Groq cannot be reached or returns no candidates.
         """
         if layer not in LAYERS:
             raise ValueError(f"Unknown layer '{layer}'; expected one of {LAYERS}.")
@@ -104,10 +106,10 @@ class ThoughtGenerator:
             logger.info("Thought generation cache hit for layer '%s'", layer)
             return cached
 
-        raw = self._call_claude(requirements, layer)
+        raw = self._call_groq(requirements, layer)
         candidates = [Candidate.model_validate(c) for c in raw.get("candidates", [])]
         if not candidates:
-            logger.warning("Claude returned no candidates for layer '%s'", layer)
+            logger.warning("Groq returned no candidates for layer '%s'", layer)
 
         self._cache.set(cache_key, candidates, _CACHE_TTL_SECONDS)
         return candidates
@@ -117,36 +119,34 @@ class ThoughtGenerator:
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     @retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=30))
-    def _call_claude_raw(self, requirements: Dict[str, Any], layer: str):
+    def _call_groq_raw(self, requirements: Dict[str, Any], layer: str) -> ToolCallResult:
         user_content = json.dumps({"layer": layer, "requirements": requirements}, default=str)
-        return self._client.messages.create(
-            model=self._settings.CLAUDE_MODEL,
+        return call_tool(
+            self._client,
+            model=self._settings.GROQ_MODEL,
+            system_prompt=_SYSTEM_PROMPT,
+            user_content=user_content,
+            tool_name="record_candidates",
+            tool_description=_CANDIDATES_TOOL["description"],
+            input_schema=_CANDIDATES_TOOL["input_schema"],
             max_tokens=2048,
             temperature=0,
-            system=_SYSTEM_PROMPT,
-            tools=[_CANDIDATES_TOOL],
-            tool_choice={"type": "tool", "name": "record_candidates"},
-            messages=[{"role": "user", "content": user_content}],
         )
 
-    def _call_claude(self, requirements: Dict[str, Any], layer: str) -> Dict[str, Any]:
+    def _call_groq(self, requirements: Dict[str, Any], layer: str) -> Dict[str, Any]:
         try:
-            response = self._call_claude_raw(requirements, layer)
+            result = self._call_groq_raw(requirements, layer)
         except Exception as exc:
-            logger.exception("Claude call failed during thought generation for layer '%s'", layer)
-            raise ExternalServiceError("claude", f"thought generation failed for layer '{layer}': {exc}") from exc
+            logger.exception("Groq call failed during thought generation for layer '%s'", layer)
+            raise ExternalServiceError("groq", f"thought generation failed for layer '{layer}': {exc}") from exc
 
-        usage = getattr(response, "usage", None)
         api_cost_tracker.record_call(
-            "claude",
-            input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
-            output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
+            "groq",
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
         )
 
-        tool_use = next((block for block in response.content if block.type == "tool_use"), None)
-        if tool_use is None:
-            raise ExternalServiceError("claude", f"no structured candidates returned for layer '{layer}'")
-        return tool_use.input
+        return result.arguments
 
 
 _thought_generator: Optional[ThoughtGenerator] = None

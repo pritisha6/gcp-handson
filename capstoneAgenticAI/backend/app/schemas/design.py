@@ -155,7 +155,7 @@ class Design(BaseModel):
     generation_seconds: Optional[float] = Field(
         default=None, ge=0, description="Wall-clock time the ArchitectAgent took to generate this design"
     )
-    api_calls_count: int = Field(default=0, ge=0, description="Claude/OpenAI API calls made while generating this design")
+    api_calls_count: int = Field(default=0, ge=0, description="Groq/OpenAI API calls made while generating this design")
     api_cost_usd: float = Field(default=0.0, ge=0, description="Estimated API spend while generating this design")
     created_at: datetime = Field(default_factory=_utcnow, description="Creation timestamp (UTC)")
     updated_at: datetime = Field(default_factory=_utcnow, description="Last update timestamp (UTC)")

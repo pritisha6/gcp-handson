@@ -266,7 +266,7 @@ class ArchitectAgent:
     def _node_cost_analysis(self, state: AgentState) -> Dict[str, Any]:
         """Cycles 13-14 (COST ANALYSIS): estimate total cost and justify overages.
 
-        Kept Claude-free by design to control API spend on a cycle that runs
+        Kept Groq-free by design to control API spend on a cycle that runs
         on every design; the justification is a deterministic template.
         """
         requirements = state["requirements"]

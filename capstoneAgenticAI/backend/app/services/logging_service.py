@@ -93,7 +93,7 @@ class LoggingService:
         success: bool = True,
         **details: Any,
     ) -> None:
-        """Log an outbound call to GCP, Claude, OpenAI, Pinecone, etc."""
+        """Log an outbound call to GCP, Groq, OpenAI, Pinecone, etc."""
         level = logging.INFO if success else logging.ERROR
         message = f"{provider} {operation} {'succeeded' if success else 'failed'}"
         self._emit(

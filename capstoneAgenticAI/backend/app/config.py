@@ -23,9 +23,12 @@ class Settings(BaseSettings):
     # --- Environment ---
     ENVIRONMENT: str = Field(default="development", description="development | staging | production")
 
-    # --- Claude / Anthropic ---
-    CLAUDE_API_KEY: str = Field(..., description="Anthropic API key used to call Claude models")
-    CLAUDE_MODEL: str = Field(default="claude-sonnet-5", description="Default Claude model id")
+    # --- Groq (LLM reasoning/extraction) ---
+    # Groq's API is OpenAI-compatible (chat completions + function calling),
+    # so it's called via the `openai` SDK pointed at Groq's base URL rather
+    # than a dedicated client. See app/utils/llm_client.py.
+    GROQ_API_KEY: str = Field(..., description="Groq API key used to call Groq-hosted models")
+    GROQ_MODEL: str = Field(default="llama-3.3-70b-versatile", description="Default Groq model id")
 
     # --- GCP ---
     GCP_PROJECT_ID: str = Field(..., description="Google Cloud project id")

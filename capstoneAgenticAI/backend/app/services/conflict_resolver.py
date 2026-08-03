@@ -1,13 +1,14 @@
 """Detects contradictions between requirement fields and suggests resolutions."""
 from typing import List, Optional
 
-from anthropic import Anthropic
+from openai import OpenAI
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import Settings, get_settings
 from app.schemas.conflict import Conflict, ConflictSeverity
 from app.schemas.design import Requirement
 from app.utils.api_cost_tracker import api_cost_tracker
+from app.utils.llm_client import ToolCallResult, call_tool, get_llm_client
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -80,9 +81,9 @@ _RESOLUTION_TOOL = {
 class ConflictResolver:
     """Detects contradictions among a Requirement's fields and suggests resolutions."""
 
-    def __init__(self, client: Optional[Anthropic] = None, settings: Optional[Settings] = None) -> None:
+    def __init__(self, client: Optional[OpenAI] = None, settings: Optional[Settings] = None) -> None:
         self._settings = settings or get_settings()
-        self._client = client or Anthropic(api_key=self._settings.CLAUDE_API_KEY)
+        self._client = client or get_llm_client(self._settings)
 
     def detect_conflicts(self, requirements: Requirement) -> List[Conflict]:
         """Detect contradictions among a Requirement's fields.
@@ -92,7 +93,7 @@ class ConflictResolver:
 
         Returns:
             Detected conflicts, most severe first. Suggested resolutions are
-            enriched via Claude when possible, falling back to a static
+            enriched via Groq when possible, falling back to a static
             per-type suggestion if that call fails.
         """
         conflicts = [
@@ -107,7 +108,7 @@ class ConflictResolver:
         ]
 
         if conflicts:
-            conflicts = self._enrich_with_claude(requirements, conflicts)
+            conflicts = self._enrich_with_groq(requirements, conflicts)
 
         severity_order = {ConflictSeverity.ERROR: 0, ConflictSeverity.WARNING: 1, ConflictSeverity.INFO: 2}
         conflicts.sort(key=lambda c: severity_order[c.severity])
@@ -186,7 +187,7 @@ class ConflictResolver:
             )
         return None
 
-    # --- Claude-assisted resolution enrichment ---
+    # --- Groq-assisted resolution enrichment ---
 
     def _summarize_requirements(self, req: Requirement) -> str:
         return (
@@ -199,18 +200,20 @@ class ConflictResolver:
         )
 
     @retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=20))
-    def _call_claude_raw(self, prompt: str):
-        return self._client.messages.create(
-            model=self._settings.CLAUDE_MODEL,
+    def _call_groq_raw(self, prompt: str) -> ToolCallResult:
+        return call_tool(
+            self._client,
+            model=self._settings.GROQ_MODEL,
+            system_prompt=_RESOLUTION_SYSTEM_PROMPT,
+            user_content=prompt,
+            tool_name="record_resolutions",
+            tool_description=_RESOLUTION_TOOL["description"],
+            input_schema=_RESOLUTION_TOOL["input_schema"],
             max_tokens=2048,
-            system=_RESOLUTION_SYSTEM_PROMPT,
-            tools=[_RESOLUTION_TOOL],
-            tool_choice={"type": "tool", "name": "record_resolutions"},
-            messages=[{"role": "user", "content": prompt}],
         )
 
-    def _enrich_with_claude(self, req: Requirement, conflicts: List[Conflict]) -> List[Conflict]:
-        """Ask Claude for sharper resolution text; falls back to static text on any failure."""
+    def _enrich_with_groq(self, req: Requirement, conflicts: List[Conflict]) -> List[Conflict]:
+        """Ask Groq for sharper resolution text; falls back to static text on any failure."""
         try:
             summary = self._summarize_requirements(req)
             conflict_lines = "\n".join(
@@ -220,21 +223,16 @@ class ConflictResolver:
             )
             prompt = f"Requirements summary:\n{summary}\n\nDetected conflicts:\n{conflict_lines}"
 
-            response = self._call_claude_raw(prompt)
-            usage = getattr(response, "usage", None)
+            result = self._call_groq_raw(prompt)
             api_cost_tracker.record_call(
-                "claude",
-                input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
-                output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
+                "groq",
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
             )
-
-            tool_use = next((block for block in response.content if block.type == "tool_use"), None)
-            if tool_use is None:
-                return conflicts
 
             by_type = {
                 item["type"]: item["suggested_resolution"]
-                for item in tool_use.input.get("resolutions", [])
+                for item in result.arguments.get("resolutions", [])
                 if item.get("suggested_resolution")
             }
             for conflict in conflicts:
@@ -242,7 +240,7 @@ class ConflictResolver:
                     conflict.suggested_resolution = by_type[conflict.type]
             return conflicts
         except Exception:
-            logger.warning("Claude resolution enrichment failed; using static suggestions.", exc_info=True)
+            logger.warning("Groq resolution enrichment failed; using static suggestions.", exc_info=True)
             return conflicts
 
 

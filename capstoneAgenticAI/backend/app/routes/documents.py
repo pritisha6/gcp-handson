@@ -93,7 +93,7 @@ async def extract_requirements(
     extractor: RequirementExtractor = Depends(get_requirement_extractor),
     resolver: ConflictResolver = Depends(get_conflict_resolver),
 ) -> ExtractRequirementsResponse:
-    """Run Claude-based requirement extraction, then rule-based conflict detection."""
+    """Run Groq-based requirement extraction, then rule-based conflict detection."""
     requirement, warnings = await run_in_threadpool(
         extractor.extract_requirements_with_warnings, request.documents
     )

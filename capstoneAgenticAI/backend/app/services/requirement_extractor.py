@@ -1,7 +1,7 @@
-"""Extracts structured ETL requirements from source documents using Claude."""
+"""Extracts structured ETL requirements from source documents using Groq."""
 from typing import Any, Dict, List, Optional, Tuple
 
-from anthropic import Anthropic
+from openai import OpenAI
 from pydantic import ValidationError
 from tenacity import retry, stop_after_attempt, wait_exponential
 
@@ -9,6 +9,7 @@ from app.config import Settings, get_settings
 from app.schemas.design import Requirement
 from app.utils.api_cost_tracker import api_cost_tracker
 from app.utils.errors import ExtractionError
+from app.utils.llm_client import ToolCallResult, call_tool, get_llm_client
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -41,6 +42,10 @@ Always respond by calling the record_requirements tool with your findings."""
 _EXTRACTION_TOOL = {
     "name": "record_requirements",
     "description": "Record the structured ETL pipeline requirements extracted from the source documents.",
+    # Note: fields not listed in a level's "required" are typed as ["<type>", "null"]
+    # rather than plain "<type>". Groq's tool-call schema validator (unlike Anthropic's)
+    # strictly rejects `null` for a field typed as a single scalar type, and the model
+    # readily emits `null` for anything it couldn't find in the source text.
     "input_schema": {
         "type": "object",
         "properties": {
@@ -51,8 +56,8 @@ _EXTRACTION_TOOL = {
                     "properties": {
                         "name": {"type": "string"},
                         "type": {"type": "string", "enum": sorted(_VALID_DATA_SOURCE_TYPES)},
-                        "size_gb": {"type": "number"},
-                        "throughput_records_sec": {"type": "number"},
+                        "size_gb": {"type": ["number", "null"]},
+                        "throughput_records_sec": {"type": ["number", "null"]},
                     },
                     "required": ["name", "type"],
                 },
@@ -60,46 +65,46 @@ _EXTRACTION_TOOL = {
             "performance": {
                 "type": "object",
                 "properties": {
-                    "latency_sla_minutes": {"type": "number"},
-                    "peak_throughput_msgs_sec": {"type": "number"},
-                    "data_freshness": {"type": "string"},
-                    "p95_latency_minutes": {"type": "number"},
+                    "latency_sla_minutes": {"type": ["number", "null"]},
+                    "peak_throughput_msgs_sec": {"type": ["number", "null"]},
+                    "data_freshness": {"type": ["string", "null"]},
+                    "p95_latency_minutes": {"type": ["number", "null"]},
                 },
             },
             "budget": {
                 "type": "object",
                 "properties": {
-                    "monthly_cap_usd": {"type": "number"},
-                    "currency": {"type": "string"},
+                    "monthly_cap_usd": {"type": ["number", "null"]},
+                    "currency": {"type": ["string", "null"]},
                 },
             },
             "team": {
                 "type": "object",
                 "properties": {
-                    "size": {"type": "integer"},
-                    "skills": {"type": "array", "items": {"type": "string"}},
+                    "size": {"type": ["integer", "null"]},
+                    "skills": {"type": ["array", "null"], "items": {"type": "string"}},
                 },
             },
             "compliance": {
                 "type": "object",
                 "properties": {
-                    "data_types": {"type": "array", "items": {"type": "string"}},
-                    "regulations": {"type": "array", "items": {"type": "string"}},
-                    "data_residency": {"type": "string"},
-                    "encryption": {"type": "boolean"},
+                    "data_types": {"type": ["array", "null"], "items": {"type": "string"}},
+                    "regulations": {"type": ["array", "null"], "items": {"type": "string"}},
+                    "data_residency": {"type": ["string", "null"]},
+                    "encryption": {"type": ["boolean", "null"]},
                 },
             },
             "context": {
                 "type": "object",
                 "properties": {
-                    "current_system": {"type": "string"},
-                    "migration_approach": {"type": "string"},
-                    "known_constraints": {"type": "string"},
-                    "priorities": {"type": "array", "items": {"type": "string"}},
+                    "current_system": {"type": ["string", "null"]},
+                    "migration_approach": {"type": ["string", "null"]},
+                    "known_constraints": {"type": ["string", "null"]},
+                    "priorities": {"type": ["array", "null"], "items": {"type": "string"}},
                 },
             },
             "extraction_notes": {
-                "type": "array",
+                "type": ["array", "null"],
                 "items": {"type": "string"},
                 "description": "Notes about fields missing, ambiguous, or inferred rather than explicit.",
             },
@@ -110,11 +115,11 @@ _EXTRACTION_TOOL = {
 
 
 class RequirementExtractor:
-    """Extracts a structured ``Requirement`` from raw document text via Claude."""
+    """Extracts a structured ``Requirement`` from raw document text via Groq."""
 
-    def __init__(self, client: Optional[Anthropic] = None, settings: Optional[Settings] = None) -> None:
+    def __init__(self, client: Optional[OpenAI] = None, settings: Optional[Settings] = None) -> None:
         self._settings = settings or get_settings()
-        self._client = client or Anthropic(api_key=self._settings.CLAUDE_API_KEY)
+        self._client = client or get_llm_client(self._settings)
 
     def extract_requirements(self, documents: List[str]) -> Requirement:
         """Extract a validated ``Requirement`` from raw document text.
@@ -127,7 +132,7 @@ class RequirementExtractor:
             with conservative defaults; details are logged as warnings.
 
         Raises:
-            ExtractionError: If Claude cannot be reached or returns unusable data.
+            ExtractionError: If Groq cannot be reached or returns unusable data.
         """
         requirement, _warnings = self.extract_requirements_with_warnings(documents)
         return requirement
@@ -143,13 +148,13 @@ class RequirementExtractor:
             fields that were missing, ambiguous, or defaulted.
 
         Raises:
-            ExtractionError: If Claude cannot be reached or returns unusable data.
+            ExtractionError: If Groq cannot be reached or returns unusable data.
         """
         if not documents:
             raise ExtractionError("No documents were provided for requirement extraction.")
 
         document_text = self._prepare_input(documents)
-        raw = self._call_claude(document_text)
+        raw = self._call_groq(document_text)
         return self._to_requirement(raw)
 
     def _prepare_input(self, documents: List[str]) -> str:
@@ -159,34 +164,31 @@ class RequirementExtractor:
         return joined
 
     @retry(reraise=True, stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=30))
-    def _call_claude_raw(self, document_text: str):
-        return self._client.messages.create(
-            model=self._settings.CLAUDE_MODEL,
-            max_tokens=4096,
-            system=_SYSTEM_PROMPT,
-            tools=[_EXTRACTION_TOOL],
-            tool_choice={"type": "tool", "name": "record_requirements"},
-            messages=[{"role": "user", "content": document_text}],
+    def _call_groq_raw(self, document_text: str) -> ToolCallResult:
+        return call_tool(
+            self._client,
+            model=self._settings.GROQ_MODEL,
+            system_prompt=_SYSTEM_PROMPT,
+            user_content=document_text,
+            tool_name="record_requirements",
+            tool_description=_EXTRACTION_TOOL["description"],
+            input_schema=_EXTRACTION_TOOL["input_schema"],
         )
 
-    def _call_claude(self, document_text: str) -> Dict[str, Any]:
+    def _call_groq(self, document_text: str) -> Dict[str, Any]:
         try:
-            response = self._call_claude_raw(document_text)
+            result = self._call_groq_raw(document_text)
         except Exception as exc:
-            logger.exception("Claude API call failed during requirement extraction")
-            raise ExtractionError(f"Claude API call failed: {exc}") from exc
+            logger.exception("Groq API call failed during requirement extraction")
+            raise ExtractionError(f"Groq API call failed: {exc}") from exc
 
-        usage = getattr(response, "usage", None)
         api_cost_tracker.record_call(
-            "claude",
-            input_tokens=getattr(usage, "input_tokens", 0) if usage else 0,
-            output_tokens=getattr(usage, "output_tokens", 0) if usage else 0,
+            "groq",
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
         )
 
-        tool_use = next((block for block in response.content if block.type == "tool_use"), None)
-        if tool_use is None:
-            raise ExtractionError("Claude did not return a structured tool_use response.")
-        return tool_use.input
+        return result.arguments
 
     def _as_number(self, value: Any, default: float, field: str, warnings: List[str]) -> float:
         if isinstance(value, (int, float)) and not isinstance(value, bool):

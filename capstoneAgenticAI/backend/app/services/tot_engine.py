@@ -49,7 +49,7 @@ class TreeOfThoughtEngine:
                 stop early once a complete path is found.
             time_budget_seconds: Wall-clock budget for the whole search.
             seed: Reserved for deterministic tie-breaking in our own
-                sorting/pruning logic. Claude's generation is not fully
+                sorting/pruning logic. Groq's generation is not fully
                 reproducible even at temperature=0; this only guarantees our
                 downstream logic is.
         """
