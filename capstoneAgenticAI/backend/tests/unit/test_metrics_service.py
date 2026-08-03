@@ -63,7 +63,7 @@ def _design(
 def metrics_service() -> MetricsService:
     firestore_client = MagicMock()
     raw_client = MagicMock()
-    settings = Settings(GROQ_API_KEY="k", GCP_PROJECT_ID="p", PINECONE_API_KEY="k", OPENAI_API_KEY="k")
+    settings = Settings(GROQ_API_KEY="k", GCP_PROJECT_ID="p", PINECONE_API_KEY="k")
     return MetricsService(firestore_client=firestore_client, raw_firestore_client=raw_client, settings=settings)
 
 

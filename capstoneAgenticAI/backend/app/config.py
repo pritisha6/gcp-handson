@@ -45,10 +45,11 @@ class Settings(BaseSettings):
     PINECONE_CLOUD: str = Field(default="aws", description="Serverless cloud provider for a new index")
     PINECONE_REGION: str = Field(default="us-east-1", description="Serverless region for a new index")
 
-    # --- OpenAI (embeddings) ---
-    OPENAI_API_KEY: str = Field(..., description="OpenAI API key used to generate document embeddings")
-    EMBEDDING_MODEL: str = Field(default="text-embedding-3-large", description="OpenAI embedding model id")
-    EMBEDDING_DIMENSIONS: int = Field(default=3072, description="Vector dimensionality of EMBEDDING_MODEL")
+    # --- Embeddings (local, fastembed/ONNX) ---
+    # Runs on-device via the `fastembed` package (see app/utils/embedding_client.py)
+    # rather than a hosted embeddings API, so no API key is needed.
+    EMBEDDING_MODEL: str = Field(default="BAAI/bge-small-en-v1.5", description="fastembed model id")
+    EMBEDDING_DIMENSIONS: int = Field(default=384, description="Vector dimensionality of EMBEDDING_MODEL")
 
     # --- Document chunking ---
     CHUNK_SIZE_TOKENS: int = Field(default=512, description="Target chunk size in tokens")

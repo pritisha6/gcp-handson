@@ -1,18 +1,19 @@
 """Pinecone-backed vector store client for document chunk embeddings.
 
-Handles both embedding generation (OpenAI) and vector storage/retrieval
-(Pinecone). Chunking itself happens upstream in
+Handles both embedding generation (a local fastembed ONNX model) and vector
+storage/retrieval (Pinecone). Chunking itself happens upstream in
 ``app.services.document_processor.DocumentProcessor``; this client only
 embeds and persists/queries already-chunked text.
 """
 from typing import Any, Dict, List, Optional
 
-from openai import OpenAI
+from fastembed import TextEmbedding
 from pinecone import Pinecone, ServerlessSpec
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.config import Settings, get_settings
 from app.utils.api_cost_tracker import api_cost_tracker
+from app.utils.embedding_client import embed_texts, get_embedding_model
 from app.utils.errors import ExternalServiceError
 from app.utils.logger import get_logger
 
@@ -23,12 +24,12 @@ _METADATA_TEXT_LIMIT = 40_000  # Pinecone metadata value size limit is 40KB
 
 
 class PineconeClient:
-    """Wraps Pinecone (vector storage) and OpenAI (embeddings) for document RAG."""
+    """Wraps Pinecone (vector storage) and a local fastembed model (embeddings) for document RAG."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Optional[Settings] = None, embedding_model: Optional[TextEmbedding] = None) -> None:
         self._settings = settings or get_settings()
         self._pc = Pinecone(api_key=self._settings.PINECONE_API_KEY)
-        self._openai = OpenAI(api_key=self._settings.OPENAI_API_KEY)
+        self._embedding_model = embedding_model or get_embedding_model(self._settings)
         self._index_name: Optional[str] = None
         self._index = None
 
@@ -65,14 +66,10 @@ class PineconeClient:
             self.initialize_index(self._settings.PINECONE_INDEX_NAME)
         return self._index
 
-    @retry(reraise=True, stop=stop_after_attempt(4), wait=wait_exponential(multiplier=1, min=1, max=20))
     def _embed_batch(self, texts: List[str]) -> List[List[float]]:
-        response = self._openai.embeddings.create(model=self._settings.EMBEDDING_MODEL, input=texts)
-        usage = getattr(response, "usage", None)
-        api_cost_tracker.record_call(
-            "openai_embedding", input_tokens=getattr(usage, "total_tokens", 0) if usage else 0
-        )
-        return [item.embedding for item in response.data]
+        embeddings = embed_texts(self._embedding_model, texts)
+        api_cost_tracker.record_call("local_embedding")
+        return embeddings
 
     @retry(reraise=True, stop=stop_after_attempt(4), wait=wait_exponential(multiplier=1, min=1, max=20))
     def _upsert_batch(self, vectors: List[Dict[str, Any]], namespace: str) -> None:

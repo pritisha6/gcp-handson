@@ -13,7 +13,7 @@ from app.utils.errors import ExtractionError
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(GROQ_API_KEY="k", GCP_PROJECT_ID="p", PINECONE_API_KEY="k", OPENAI_API_KEY="k")
+    return Settings(GROQ_API_KEY="k", GCP_PROJECT_ID="p", PINECONE_API_KEY="k")
 
 
 @pytest.fixture

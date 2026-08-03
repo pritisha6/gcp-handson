@@ -17,7 +17,7 @@ logger = get_logger(__name__)
 # Update as vendor pricing changes; these are estimates for cost-tracking purposes only.
 _PRICING_PER_MILLION: Dict[str, Dict[str, float]] = {
     "groq": {"input": 0.59, "output": 0.79},  # llama-3.3-70b-versatile
-    "openai_embedding": {"input": 0.13, "output": 0.0},
+    "local_embedding": {"input": 0.0, "output": 0.0},  # runs on-device, no per-call cost
 }
 
 

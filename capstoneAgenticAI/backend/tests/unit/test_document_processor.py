@@ -15,7 +15,6 @@ def settings() -> Settings:
         GROQ_API_KEY="k",
         GCP_PROJECT_ID="p",
         PINECONE_API_KEY="k",
-        OPENAI_API_KEY="k",
         CHUNK_SIZE_TOKENS=512,
         CHUNK_OVERLAP_TOKENS=50,
         MAX_UPLOAD_FILE_SIZE_MB=500,
