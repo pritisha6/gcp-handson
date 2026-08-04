@@ -1,8 +1,8 @@
 # ETL Design Agent
 
 An AI system that generates optimal Google Cloud Platform ETL/data-pipeline architectures
-from a set of business and technical requirements — turning a ~15-20 minute conversation
-with Claude into a reviewed, cost-estimated, compliance-checked design ready for
+from a set of business and technical requirements — turning a ~15-20 minute agent run
+(powered by Groq) into a reviewed, cost-estimated, compliance-checked design ready for
 stakeholder sign-off.
 
 You describe what you need (data sources, latency SLA, budget, team skills, compliance
@@ -42,8 +42,9 @@ approval workflow to sign off on it.
 
 For each architecture layer (`ingestion → processing → storage → serving`), the agent:
 
-1. **Generates candidates** (`ThoughtGenerator`) — asks Claude for 3-5 plausible GCP
-   services for that layer, aware of what's already been picked upstream.
+1. **Generates candidates** (`ThoughtGenerator`) — asks Groq (`llama-3.3-70b-versatile`)
+   for 3-5 plausible GCP services for that layer, aware of what's already been picked
+   upstream.
 2. **Scores them** (`CriticEvaluator`) — each candidate gets a weighted score across
    latency (30%), cost (30%), ops burden (25%), and compliance (15%), using a mix of
    deterministic service-profile lookups and live RAG data (pricing, compliance rules).
@@ -74,11 +75,27 @@ A separate `HallucinationDetector` cross-checks every specific number/claim in t
 design's reasoning text against the structured data that's actually traceable to a
 retrieved document, API response, or cost calculation — flagging anything that isn't.
 
+### LLM reasoning and embeddings
+
+All structured LLM reasoning (requirement extraction, conflict resolution, Tree-of-Thought
+candidate generation, hallucination detection) goes through **Groq**, called via the
+`openai` SDK pointed at Groq's OpenAI-compatible endpoint (`app/utils/llm_client.py`) —
+one shared adapter handles the request/response shape, while each service keeps its own
+retry policy, error translation, and cost tracking.
+
+Document embeddings (for the Pinecone-backed RAG layer) run **locally**, via
+[`fastembed`](https://github.com/qdrant/fastembed) (`BAAI/bge-small-en-v1.5`, ONNX,
+384-dim) — no external embeddings API or API key required. This is a deliberate choice:
+Groq doesn't offer an embeddings endpoint, and `sentence-transformers`/`torch` was ruled
+out because its packaged license files nest deep enough to exceed Windows' default
+260-character path limit under a long repo path; `fastembed` has no `torch` dependency and
+sidesteps the issue while staying fully on-device.
+
 ## Project structure
 
 ```
 capstoneAgenticAI/
-├── backend/            FastAPI + Pydantic + Firestore + Pinecone + Claude
+├── backend/            FastAPI + Pydantic + Firestore + Pinecone + Groq
 │   ├── app/
 │   │   ├── agents/      ThoughtGenerator, CriticEvaluator, DecisionMaker, StateManager
 │   │   ├── services/    ArchitectAgent, ToT engine, RAG, guardrails, cost/compliance
@@ -86,7 +103,8 @@ capstoneAgenticAI/
 │   │   ├── routes/      /api/designs, /api/documents, /api/validate, /api/metrics
 │   │   ├── db/          Firestore + Pinecone clients, collection schemas
 │   │   ├── schemas/     Pydantic models (the API/domain contract)
-│   │   └── utils/       config, logging, errors, caching, cost tracking
+│   │   └── utils/       config, logging, errors, caching, cost tracking,
+│   │                     llm_client (Groq adapter), embedding_client (fastembed)
 │   └── tests/unit/       pytest suite (96 tests)
 └── frontend/           Next.js 14 (App Router) + TypeScript + Tailwind + shadcn/ui
     └── src/
@@ -99,9 +117,10 @@ capstoneAgenticAI/
 ## Tech stack
 
 **Backend** — Python 3.11, FastAPI, Pydantic v2, LangGraph (agent orchestration),
-Anthropic Claude (reasoning, extraction, hallucination checks), OpenAI embeddings +
-Pinecone (RAG over uploaded documents), Google Cloud Firestore (storage), Google Cloud
-Logging, GCP Billing Catalog API (live pricing, with a static fallback).
+Groq (`llama-3.3-70b-versatile`, via the OpenAI-compatible SDK — reasoning, extraction,
+hallucination checks), fastembed + Pinecone (local on-device embeddings + RAG over
+uploaded documents), Google Cloud Firestore (storage), Google Cloud Logging, GCP Billing
+Catalog API (live pricing, with a static fallback).
 
 **Frontend** — Next.js 14 App Router, TypeScript (strict), Tailwind CSS, shadcn/ui
 (Radix primitives), React Hook Form + Zod, Recharts, Mermaid, TanStack Table.
@@ -114,7 +133,7 @@ Logging, GCP Billing Catalog API (live pricing, with a static fallback).
 | `GET /api/designs/{id}` | Poll for the completed design |
 | `GET /api/designs` | List/filter/paginate designs |
 | `POST /api/documents/upload` | Upload & chunk source documents (PDF/PPTX/XLSX/HTML/TXT/CSV) into Pinecone |
-| `POST /api/documents/extract` | Extract structured requirements from document text via Claude |
+| `POST /api/documents/extract` | Extract structured requirements from document text via Groq |
 | `POST /api/validate/requirements` / `/design` | Run guardrails directly |
 | `GET /api/metrics` | Aggregate quality/reliability/efficiency/user-impact metrics |
 | `GET /api/metrics/trends` | Coverage/cost/generation-time trends |
@@ -132,11 +151,42 @@ cd backend
 python -m venv .venv
 .venv/Scripts/activate        # or source .venv/bin/activate on macOS/Linux
 pip install -r requirements.txt
-cp .env.example .env          # fill in CLAUDE_API_KEY, GCP_PROJECT_ID, PINECONE_API_KEY, OPENAI_API_KEY
+cp .env.example .env          # fill in GROQ_API_KEY, GCP_PROJECT_ID, PINECONE_API_KEY (see below)
 uvicorn app.main:app --reload --port 8000
 ```
 
 Run the test suite with `pytest tests/` (96 tests, all mocked — no live API keys needed).
+
+#### Required environment variables
+
+| Variable | Notes |
+|---|---|
+| `GROQ_API_KEY` | From [console.groq.com](https://console.groq.com) — powers all LLM reasoning. |
+| `GCP_PROJECT_ID` | Your GCP project id. |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to a service-account JSON key (see below). |
+| `PINECONE_API_KEY` | From [pinecone.io](https://www.pinecone.io) — vector store for uploaded documents. |
+| `EMBEDDING_MODEL` / `EMBEDDING_DIMENSIONS` | Default to `BAAI/bge-small-en-v1.5` / `384`; run locally via `fastembed`, no key needed. |
+
+No `OPENAI_API_KEY` or `CLAUDE_API_KEY` is required — see [LLM reasoning and
+embeddings](#llm-reasoning-and-embeddings) above.
+
+#### One-time GCP setup
+
+1. **Enable APIs** on the project: `firestore.googleapis.com`, `cloudbilling.googleapis.com`,
+   and `logging.googleapis.com` (only needed if you run with `ENVIRONMENT=production`).
+2. **Create a Firestore database** (Native mode) if the project doesn't have one yet —
+   `console.cloud.google.com/datastore/setup?project=<your-project>`, or
+   `gcloud firestore databases create --project=<your-project> --location=<region> --type=firestore-native`.
+   Note whichever database ID you choose (the special default is `(default)`) and set
+   `FIRESTORE_DATABASE` to match.
+3. **Create a service account** with `roles/datastore.user` (Firestore read/write) — add
+   `roles/logging.logWriter` too if you'll run with `ENVIRONMENT=production`. Download its
+   JSON key and point `GOOGLE_APPLICATION_CREDENTIALS` at it. Never commit this file — keep
+   it outside version control (e.g. a gitignored `secrets/` directory).
+4. **First composite query**: the first time `GET /api/designs` runs against a fresh
+   database, Firestore will return a `FAILED_PRECONDITION` error with a console link to
+   auto-create the required composite index (`deleted` + `created_at`). Click through it
+   once; the index builds in a minute or two and the error won't recur.
 
 ### Frontend
 
